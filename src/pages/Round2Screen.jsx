@@ -694,6 +694,8 @@ export default function Round2Screen({ audio }) {
     roundDone.current = true;
     setDone(true);
 
+    collectFragment(1, config.fragments[1]);
+
     audio.playSuccess();
     showFlash(`Fragment 2 unlocked: ${config.fragments[1]}`, 'info', 4000);
     setCelebrate(true);
@@ -846,7 +848,6 @@ export default function Round2Screen({ audio }) {
                 <h2>⬡ SECURITY LAYER II</h2>
                 <p className="subtitle">Co-op Dark Maze <span className={`diff-badge ${config.difficulty}`}>{config.difficulty}</span></p>
               </div>
-              <button className="btn btn-outline" onClick={() => setIsFullscreen(true)}>⛶ Full Screen</button>
             </div>
             <ProgressTrack current={2} />
 
@@ -866,9 +867,16 @@ export default function Round2Screen({ audio }) {
                 P2: WASD &nbsp;|&nbsp; P1: Arrows
               </div>
             )}
-            <div className="maze-wrap" style={{ height: isFullscreen ? '100%' : 'auto', width: isFullscreen ? '100%' : 'auto', display: 'flex', justifyContent: 'center' }}>
+            <div className="maze-wrap" style={{ position: 'relative', height: isFullscreen ? '100%' : 'auto', width: isFullscreen ? '100%' : 'auto', display: 'flex', justifyContent: 'center' }}>
               <canvas ref={mazeRef} id="maze-canvas" width={W} height={H} style={canvasStyle} />
               {!isFullscreen && <canvas ref={mmRef} id="minimap" width={COLS * 4} height={ROWS * 4} style={{ width: COLS * 4, height: ROWS * 4 }} />}
+              {!isFullscreen && (
+                <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <button className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '1.2rem', padding: '1rem 2rem', background: 'rgba(5,5,15,0.9)', boxShadow: '0 0 20px rgba(0,0,0,0.8)' }} onClick={() => setIsFullscreen(true)}>
+                    <span>⛶</span> FULL SCREEN TO PLAY
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 

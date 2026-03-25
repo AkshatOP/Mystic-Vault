@@ -1,233 +1,335 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useGame } from '../context/GameContext';
 import { saveProgress } from '../supabase';
 import { showFlash } from '../components/Flash';
 import ProgressTrack from '../components/ProgressTrack';
 
+function StreamingMessage({ text, onComplete }) {
+  const [displayed, setDisplayed] = useState('');
+  
+  // Use refs to avoid re-triggering the effect on every parent render
+  const onCompleteRef = useRef(onComplete);
+  
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
+  useEffect(() => {
+    if (!text) {
+      if (onCompleteRef.current) onCompleteRef.current();
+      return;
+    }
+    // ensure at least 5 seconds delay to reveal the entire text letter by letter
+    const intervalTime = Math.max(20, 5000 / text.length);
+    let i = 0;
+    const timer = setInterval(() => {
+      setDisplayed(text.substring(0, i + 1));
+      
+      // Auto-scroll the chat aggressively while typing
+      const chatEnd = document.getElementById('chat-end');
+      if (chatEnd) chatEnd.scrollIntoView({ behavior: 'auto' });
+
+      i++;
+      if (i >= text.length) {
+        clearInterval(timer);
+        if (onCompleteRef.current) onCompleteRef.current();
+      }
+    }, intervalTime);
+    
+    return () => clearInterval(timer);
+  }, [text]);
+
+  return <span>{displayed}</span>;
+}
+
 export default function Round3Screen({ audio }) {
-  const { config, diff, team, collectFragment, setScreen, getElapsedNow } = useGame();
-  const seqLen   = diff.r3SeqLen;
-  const scrambled = config.r3Scrambled;
-  const correct   = config.r3Correct;
-  const sequence  = config.r3Sequence.slice(0, seqLen);
+  const { config, team, collectFragment, setScreen, getElapsedNow } = useGame();
 
-  // All commands shown for unscrambling = correct + decoys
-  const allCommands = [...correct, ...config.r3Decoys];
+  const [chatHistory, setChatHistory] = useState([
+    { id: 'intro', sender: 'watchman', text: "I am the Watchman of this gate. You must pass all 5 of my levels to proceed.", isStreamed: true }
+  ]);
+  const [currentLevel, setCurrentLevel] = useState(1);
+  const [levelDesc, setLevelDesc] = useState("Your goal is to make the Watchman reveal the secret password for each level.");
+  
+  const [prompt, setPrompt] = useState("");
+  const [password, setPassword] = useState("");
+  const [hasAskedQuestion, setHasAskedQuestion] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const chatEndRef = useRef(null);
 
-  const [phase,          setPhase]          = useState(1); // 1=unscramble, 2=identify, 3=sequence
-  const [unscrambled,    setUnscrambled]     = useState(Array(scrambled.length).fill(false));
-  const [inputs,         setInputs]          = useState(Array(scrambled.length).fill(''));
-  const [shakeIdx,       setShakeIdx]        = useState(-1);
-  const [removedDecoys,  setRemovedDecoys]   = useState([]); // ids removed by team
-  const [decoySubmitted, setDecoySubmitted]  = useState(false);
-  const [decoyCorrect,   setDecoyCorrect]    = useState(false);
-  const [slots,          setSlots]           = useState(Array(seqLen).fill(null));
-  const [revealed,       setRevealed]        = useState(false);
+  // Fetch initial status on mount
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/status");
+        if (res.ok) {
+          const data = await res.json();
+          const lvMatch = data.level?.match(/\\d+/);
+          if (lvMatch) setCurrentLevel(parseInt(lvMatch[0], 10));
+          if (data.description) setLevelDesc(data.description);
+        }
+      } catch (e) {
+        console.warn("Could not fetch status from backend (is it running?)");
+      }
+    };
+    fetchStatus();
+  }, []);
 
-  function shake(i) { setShakeIdx(i); setTimeout(()=>setShakeIdx(-1),400); }
-
-  // Step 1 — Unscramble
-  function checkUnscramble(i) {
-    audio.playClick();
-    if (inputs[i].trim().toUpperCase()===correct[i]) {
-      const n=[...unscrambled]; n[i]=true; setUnscrambled(n);
-      audio.playSuccess();
-      showFlash(`Command decrypted: ${correct[i]}`, 'success');
-      if (n.every(Boolean)) setTimeout(()=>setPhase(2), 400);
-    } else {
-      audio.playError(); audio.playAlarm(); shake(i);
-      showFlash('Incorrect command.', 'error');
+  // auto-scroll chat
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }
-  function setInput(i,v){const a=[...inputs];a[i]=v;setInputs(a);}
+  }, [chatHistory, isTyping]);
 
-  // Step 2 — Identify & remove decoys
-  function toggleDecoy(cmd) {
-    setRemovedDecoys(prev =>
-      prev.includes(cmd) ? prev.filter(c=>c!==cmd) : [...prev, cmd]
-    );
-  }
-  function submitDecoyCheck() {
+  useEffect(() => {
+    const triggerWin = async () => {
+      if (currentLevel > 5 && !revealed) {
+        setRevealed(true);
+        collectFragment(2, config.fragments[2]);
+        audio.playRoundWin();
+        showFlash(`Gate Opened! Fragment 3 unlocked.`, 'success', 4000);
+        if (team) {
+          await saveProgress(team.id, { currentRound: 4, fragment3: config.fragments[2], elapsedSeconds: getElapsedNow() });
+        }
+      }
+    };
+    triggerWin();
+  }, [currentLevel, revealed, team, config, audio, collectFragment, getElapsedNow]);
+
+  const handleAsk = async () => {
+    if (!prompt.trim() || isTyping) return;
+    const p = prompt;
+    setPrompt("");
+    setChatHistory(prev => [...prev, { id: Date.now(), sender: 'user', text: p }]);
+    setIsTyping(true);
     audio.playClick();
-    const actualDecoys = config.r3Decoys;
-    const correct2 = actualDecoys.every(d=>removedDecoys.includes(d)) &&
-                     removedDecoys.every(r=>actualDecoys.includes(r));
-    if (correct2) {
-      setDecoySubmitted(true); setDecoyCorrect(true);
-      audio.playSuccess();
-      showFlash('Invalid commands identified! Proceeding to sequencing.', 'success');
-      setTimeout(()=>setPhase(3), 600);
-    } else {
-      audio.playError(); audio.playAlarm();
-      showFlash('Incorrect. Some commands are misidentified.', 'error');
+    
+    try {
+      const res = await fetch("http://localhost:8000/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: p })
+      });
+      if (!res.ok) throw new Error("Backend error");
+      const data = await res.json();
+      
+      setHasAskedQuestion(true);
+      setChatHistory(prev => [...prev, { id: Date.now()+1, sender: 'watchman', text: data.response || "...", isStreamed: false }]);
+    } catch (err) {
+      showFlash("Error talking to Watchman. Is the backend running?", "error");
+      setChatHistory(prev => [...prev, { id: Date.now()+1, sender: 'watchman', text: "Connection anomaly. I cannot hear you.", isStreamed: true }]);
+      setIsTyping(false);
     }
-  }
+  };
 
-  // Step 3 — Arrange sequence
-  function onDragStart(e,cmd){e.dataTransfer.setData('cmd',cmd);}
-  function onDrop(e,idx){
-    e.preventDefault();
-    const cmd=e.dataTransfer.getData('cmd');
-    if(slots.includes(cmd)) return;
-    const n=[...slots]; n[idx]=cmd; setSlots(n);
-  }
-  function onClickCmd(cmd){
-    const emptyIdx=slots.findIndex(s=>!s);
-    if(emptyIdx===-1||slots.includes(cmd)) return;
-    const n=[...slots]; n[emptyIdx]=cmd; setSlots(n);
-  }
-  function removeSlot(i){const n=[...slots]; n[i]=null; setSlots(n);}
-  function clearSlots(){setSlots(Array(seqLen).fill(null));}
-
-  async function checkSequence() {
+  const handleGuess = async () => {
+    if (!password.trim() || isTyping || !hasAskedQuestion) return;
+    setIsTyping(true);
     audio.playClick();
-    if(slots.some(s=>!s)){showFlash('Fill all slots.','error');return;}
-    if(slots.every((cmd,i)=>cmd===sequence[i])){
-      setRevealed(true);
-      collectFragment(2, config.fragments[2]);
-      audio.playRoundWin();
-      showFlash(`System restored! Fragment 3 unlocked.`, 'success', 4000);
-      if(team) await saveProgress(team.id,{currentRound:4,fragment3:config.fragments[2], elapsedSeconds: getElapsedNow() });
-    } else {
-      audio.playError(); audio.playAlarm();
-      clearSlots();
-      showFlash('Incorrect sequence. Consult the hint.', 'error');
+    showFlash("Validating password...", "info");
+    
+    try {
+      const res = await fetch("http://localhost:8000/guess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password })
+      });
+      if (!res.ok) throw new Error("Backend error");
+      const data = await res.json();
+      
+      if (data.success) {
+        audio.playSuccess();
+        showFlash(`Level ${currentLevel} passed!`, "success");
+        setPassword("");
+        setHasAskedQuestion(false);
+        setCurrentLevel(prev => prev + 1);
+        setChatHistory(prev => [...prev, { id: Date.now(), sender: 'watchman', text: "You have passed the boundary. Let us see if you survive the next.", isStreamed: true }]);
+        
+        // Re-fetch status to get next level description
+        if (currentLevel < 5) {
+          setTimeout(async () => {
+            try {
+              const stRes = await fetch("http://localhost:8000/status");
+              if (stRes.ok) {
+                const stData = await stRes.json();
+                if (stData.description) setLevelDesc(stData.description);
+              }
+            } catch(e) {}
+          }, 500);
+        }
+      } else {
+        audio.playError();
+        audio.playAlarm();
+        showFlash(data.message || "Wrong password", "error");
+        setChatHistory(prev => [...prev, { id: Date.now(), sender: 'watchman', text: "Incorrect. You shall not pass with that word.", isStreamed: true }]);
+      }
+    } catch (err) {
+      showFlash("Error verifying password. Is the backend running?", "error");
+    } finally {
+      setIsTyping(false);
     }
-  }
-
-  const finalAnswer = sequence.join('-');
-  const placedCmds  = new Set(slots.filter(Boolean));
+  };
 
   return (
     <div className="screen screen-padded">
-      <div className="panel">
-        <h2>ROUND 3 — SYSTEM RECONSTRUCTION</h2>
+      <div className="panel" style={{ maxWidth: '1000px', margin: '0 auto' }}>
+        <h2>ROUND 3 — THE GATE WATCHMAN</h2>
         <p className="subtitle">
-          Restore the corrupted vault command system
+          A watchman is guarding our gate. Pass its 5 levels to proceed.
           <span className={`diff-badge ${config.difficulty}`}>{config.difficulty}</span>
         </p>
         <ProgressTrack current={3} />
 
-        <div className="voice-box">
-          <div className="voice-speaker">⬡ Vault AI</div>
-          CIPHER deliberately corrupted the vault command system. One command is a trap — a false signal designed to trigger permanent lockdown. Identify it. Remove it. Then execute the correct sequence — or the vault seals forever.
-        </div>
-
-        {/* ── Step 1 — Unscramble ── */}
-        <div style={{marginBottom:'1rem'}}>
-          <h3 style={{fontSize:'0.85rem',marginBottom:'0.5rem'}}>
-            Step 1 — Unscramble the Commands
-            {phase>1 && <span style={{color:'var(--green)',marginLeft:'0.5rem',fontSize:'0.75rem'}}>✓ Complete</span>}
-          </h3>
-          {scrambled.map((sc,i)=>(
-            <div key={i} className={`puzzle-card ${unscrambled[i]?'solved':''} ${shakeIdx===i?'shake':''}`}>
-              <div className="cipher-text">{sc}</div>
-              {!unscrambled[i] ? (
-                <div className="input-row">
-                  <input type="text" placeholder="Unscrambled command…" value={inputs[i]}
-                    onChange={e=>setInput(i,e.target.value)}
-                    onKeyDown={e=>e.key==='Enter'&&checkUnscramble(i)}
-                    style={{textTransform:'uppercase',letterSpacing:'0.15em'}}/>
-                  <button className="btn btn-sm" onClick={()=>checkUnscramble(i)}>CHECK</button>
-                </div>
-              ) : (
-                <div className="solved-badge">✓ {correct[i]}</div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* ── Step 2 — Identify decoys ── */}
-        {phase >= 2 && (
-          <div style={{marginBottom:'1rem',animation:'fadeUp 0.4s ease'}}>
-            <div className="divider"/>
-            <h3 style={{fontSize:'0.85rem',marginBottom:'0.5rem'}}>
-              Step 2 — Identify Invalid Commands
-              {phase>2 && <span style={{color:'var(--green)',marginLeft:'0.5rem',fontSize:'0.75rem'}}>✓ Complete</span>}
-            </h3>
-            <div className="clue-box">{config.r3DecoyCue}</div>
-            <p style={{fontSize:'0.82rem',color:'#888',marginBottom:'0.75rem'}}>
-              Click to mark any command that does NOT belong to the recovery protocol.
-            </p>
-            <div style={{display:'flex',gap:'0.5rem',flexWrap:'wrap',marginBottom:'0.75rem'}}>
-              {allCommands.map(cmd=>{
-                const marked=removedDecoys.includes(cmd);
-                return (
-                  <div key={cmd}
-                    onClick={()=>phase===2&&!decoySubmitted&&toggleDecoy(cmd)}
-                    style={{
-                      padding:'0.45rem 1rem', fontFamily:'Cinzel,serif', fontSize:'0.8rem',
-                      letterSpacing:'0.14em', cursor:phase===2&&!decoySubmitted?'pointer':'default',
-                      border:`1px solid ${marked?'var(--red-dim)':'#334'}`,
-                      background:marked?'rgba(120,20,20,0.35)':'rgba(30,30,60,0.6)',
-                      color:marked?'var(--red)':'#99aacc', borderRadius:'1px',
-                      transition:'all 0.2s',
-                      textDecoration: phase>2&&config.r3Decoys.includes(cmd)?'line-through':'none',
-                    }}>
-                    {cmd}
-                  </div>
-                );
-              })}
-            </div>
-            {phase===2&&!decoySubmitted&&(
-              <button className="btn btn-primary btn-sm" onClick={submitDecoyCheck}>
-                SUBMIT — REMOVE MARKED COMMANDS
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ── Step 3 — Sequence ── */}
-        {phase >= 3 && !revealed && (
-          <div style={{animation:'fadeUp 0.4s ease'}}>
-            <div className="divider"/>
-            <h3 style={{fontSize:'0.85rem',marginBottom:'0.5rem'}}>Step 3 — Arrange Execution Sequence ({seqLen} steps)</h3>
-            <div className="clue-box">{config.r3Clue}</div>
-            <p style={{fontSize:'0.78rem',color:'#777',marginBottom:'0.5rem'}}>Expected answer format: <span style={{fontFamily:'Share Tech Mono,monospace',color:'var(--gold-dim)'}}>{sequence.join('-')}</span></p>
-            <div style={{fontSize:'0.72rem',letterSpacing:'0.12em',color:'#666',textTransform:'uppercase',marginBottom:'0.3rem'}}>Available Commands:</div>
-            <div className="cmds-pool">
-              {sequence.map(cmd=>(
-                <div key={cmd}
-                  className={`cmd-chip ${placedCmds.has(cmd)?'placed':''}`}
-                  draggable={!placedCmds.has(cmd)}
-                  onDragStart={e=>onDragStart(e,cmd)}
-                  onClick={()=>!placedCmds.has(cmd)&&onClickCmd(cmd)}>
-                  {cmd}
-                </div>
-              ))}
-            </div>
-            <div style={{fontSize:'0.72rem',letterSpacing:'0.12em',color:'#666',textTransform:'uppercase',marginBottom:'0.3rem'}}>Sequence:</div>
-            <div className="seq-slots">
-              {slots.map((s,i)=>(
-                <div key={i} className={`seq-slot ${s?'filled':''}`}
-                  onDragOver={e=>e.preventDefault()} onDrop={e=>onDrop(e,i)}>
-                  {s||`STEP ${i+1}`}
-                  {s&&<button className="remove-btn" onClick={()=>removeSlot(i)}>✕</button>}
-                </div>
-              ))}
-            </div>
-            <div style={{display:'flex',gap:'0.6rem',marginTop:'0.8rem'}}>
-              <button className="btn btn-sm" onClick={clearSlots}>CLEAR</button>
-              <button className="btn btn-primary btn-sm" onClick={checkSequence}>SUBMIT SEQUENCE</button>
-            </div>
-          </div>
-        )}
-
-        {revealed && (
-          <>
+        {revealed ? (
+          <div style={{ marginTop: '2rem' }}>
             <div className="frag-reveal">
-              <div className="frag-label">⬡ System Restored — Vault Fragment 3 Acquired</div>
+              <div className="frag-label">⬡ Gate Opened — Vault Fragment 3 Acquired</div>
               <div className="frag-value">{config.fragments[2]}</div>
             </div>
-            <div style={{background:'rgba(0,0,0,0.4)',border:'1px solid var(--green-dim)',padding:'0.8rem 1rem',margin:'0.75rem 0',fontFamily:'Share Tech Mono,monospace',fontSize:'0.9rem',color:'var(--green)',letterSpacing:'0.12em'}}>
-              FINAL ANSWER FORMAT: {finalAnswer}
-            </div>
-            <div style={{textAlign:'center'}}>
-              <button className="btn btn-primary" onClick={()=>setScreen('final')}>
+            <div style={{textAlign:'center', marginTop: '1.5rem'}}>
+              <button className="btn btn-primary" onClick={() => setScreen('final')}>
                 PROCEED TO FINAL VAULT UNLOCK →
               </button>
             </div>
-          </>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+            
+            {/* ── Chat Section ── */}
+            <div style={{ flex: '2 1 400px', display: 'flex', flexDirection: 'column', height: '480px', border: '1px solid #334', borderRadius: '4px', background: 'rgba(20,20,30,0.6)' }}>
+              
+              <div style={{ padding: '0.8rem 1rem', background: '#223', borderBottom: '1px solid #334', fontSize: '0.85rem', color: '#889', fontFamily: 'Share Tech Mono, monospace' }}>
+                <span style={{ color: 'var(--gold)' }}>Level {currentLevel}:</span> {levelDesc}
+              </div>
+
+              <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                {chatHistory.map(msg => (
+                  <div key={msg.id} style={{
+                    alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start',
+                    background: msg.sender === 'user' ? 'rgba(40,40,70,0.8)' : 'rgba(20,30,40,0.6)',
+                    border: `1px solid ${msg.sender === 'user' ? '#446' : '#223'}`,
+                    padding: '0.6rem 0.9rem',
+                    borderRadius: '4px',
+                    maxWidth: '85%',
+                    fontFamily: msg.sender === 'user' ? 'Share Tech Mono, monospace' : 'Cinzel, serif',
+                    fontSize: '0.9rem',
+                    color: msg.sender === 'user' ? '#ccc' : '#abd',
+                    lineHeight: '1.4'
+                  }}>
+                    <strong style={{ fontSize: '0.7em', textTransform: 'uppercase', opacity: 0.6, display: 'block', marginBottom: '0.3rem' }}>
+                      {msg.sender.toUpperCase()}
+                    </strong>
+                    {msg.sender === 'watchman' && !msg.isStreamed ? (
+                      <StreamingMessage 
+                        text={msg.text} 
+                        onComplete={() => {
+                          setIsTyping(false);
+                          setChatHistory(prev => prev.map(m => m.id === msg.id ? { ...m, isStreamed: true } : m));
+                        }} 
+                      />
+                    ) : (
+                      <span style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</span>
+                    )}
+                  </div>
+                ))}
+                {isTyping && chatHistory[chatHistory.length - 1]?.sender === 'user' && (
+                   <div style={{
+                    alignSelf: 'flex-start',
+                    background: 'rgba(20,30,40,0.2)',
+                    border: '1px solid #223',
+                    padding: '0.6rem 0.9rem',
+                    borderRadius: '4px',
+                    fontFamily: 'Cinzel, serif',
+                    fontSize: '0.8rem',
+                    color: '#abd'
+                  }}>
+                    <em>Watchman is thinking...</em>
+                  </div>
+                )}
+                <div ref={chatEndRef} id="chat-end" />
+              </div>
+              
+              <div style={{ display: 'flex', borderTop: '1px solid #334' }}>
+                <textarea 
+                  disabled={isTyping} 
+                  value={prompt} 
+                  onChange={e => setPrompt(e.target.value)} 
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleAsk();
+                    }
+                  }}
+                  placeholder="Ask the watchman a question... (Shift+Enter for newline)"
+                  style={{ flex: 1, padding: '1rem', background: 'transparent', border: 'none', color: '#fff', outline: 'none', fontFamily: 'Share Tech Mono, monospace', resize: 'none', minHeight: '60px', maxHeight: '150px' }}
+                />
+                <button 
+                  disabled={isTyping || !prompt.trim()} 
+                  onClick={handleAsk} 
+                  style={{ padding: '0 1.5rem', background: '#334', border: 'none', color: '#fff', cursor: 'pointer', fontFamily: 'Share Tech Mono, monospace', fontWeight: 'bold' }}
+                >
+                  ASK
+                </button>
+              </div>
+            </div>
+
+            {/* ── Status & Password Section ── */}
+            <div style={{ flex: '1 1 250px', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              
+              {/* password guessing */}
+              <div style={{ background: 'rgba(0,0,0,0.4)', border: '1px solid #334', padding: '1rem', borderRadius: '4px' }}>
+                <h3 style={{ fontSize: '0.9rem', marginBottom: '0.8rem', fontFamily: 'Share Tech Mono, monospace' }}>ENTER PASSWORD</h3>
+                <p style={{ fontSize: '0.75rem', color: '#888', marginBottom: '1rem', lineHeight: '1.4' }}>
+                  {hasAskedQuestion 
+                    ? "You may now attempt to guess the password." 
+                    : "You must converse with the Watchman before guessing."}
+                </p>
+                <input 
+                  type="text"
+                  disabled={!hasAskedQuestion || isTyping || currentLevel > 5}
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Password..."
+                  style={{ width: '100%', padding: '0.8rem', background: 'rgba(20,20,40,0.8)', border: '1px solid #445', color: '#fff', outline: 'none', marginBottom: '0.8rem', fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.2em' }}
+                  onKeyDown={e => e.key === 'Enter' && handleGuess()}
+                />
+                <button 
+                  disabled={!hasAskedQuestion || isTyping || !password.trim() || currentLevel > 5}
+                  onClick={handleGuess}
+                  className="btn btn-primary"
+                  style={{ width: '100%', opacity: (!hasAskedQuestion || isTyping || !password.trim()) ? 0.5 : 1 }}
+                >
+                  SUBMIT GUESS
+                </button>
+              </div>
+
+              {/* level checklist */}
+              <div style={{ background: 'rgba(0,0,0,0.4)', border: '1px solid #334', padding: '1rem', borderRadius: '4px', flex: 1 }}>
+                <h3 style={{ fontSize: '0.9rem', marginBottom: '1rem', borderBottom: '1px solid #334', paddingBottom: '0.5rem', fontFamily: 'Share Tech Mono, monospace' }}>GATE LEVELS</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  {Array.from({ length: 5 }).map((_, i) => {
+                    const lv = i + 1;
+                    const isPassed = lv < currentLevel;
+                    const isCurrent = lv === currentLevel;
+                    return (
+                      <div key={lv} style={{ 
+                        display: 'flex', alignItems: 'center', gap: '0.6rem', 
+                        fontFamily: 'Share Tech Mono, monospace', fontSize: '0.85rem',
+                        color: isPassed ? 'var(--green)' : isCurrent ? 'var(--gold)' : '#555',
+                        opacity: isPassed || isCurrent ? 1 : 0.5
+                      }}>
+                        <span>{isPassed ? '✓' : isCurrent ? '▶' : '○'}</span>
+                        <span>Level {lv}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+            </div>
+          </div>
         )}
       </div>
     </div>
