@@ -14,7 +14,7 @@ const BOT_STEP_MS_EASY = 550;  // ms between each bot step on easy
 const BOT_STEP_MS_HARD = 450;  // ms between each bot step on hard
 const CHECKPOINT_EVERY = 15;   // auto-checkpoint every N steps
 
-const DEV_DISABLE_DARKNESS = true; // TOGGLE THIS to false for production to enable darkness
+const DEV_DISABLE_DARKNESS = false; // TOGGLE THIS to false for production to enable darkness
 
 // ── Maze generator (recursive backtracker) ────────────────────────────────────
 function generateMaze(cols, rows) {
