@@ -3,6 +3,7 @@ import { useGame } from '../context/GameContext';
 import { markWinner } from '../supabase';
 import { showFlash } from '../components/Flash';
 import ProgressTrack from '../components/ProgressTrack';
+import CreditScene from './CreditScene';
 
 function fmt(s) {
   return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
@@ -10,9 +11,21 @@ function fmt(s) {
 
 export default function FinalScreen({ audio }) {
   const { config, team, fragments, elapsed, stopTimer, getElapsedNow, resetGame } = useGame();
-  const [input,    setInput]    = useState('');
-  const [unlocked, setUnlocked] = useState(false);
-  const [shake,    setShake]    = useState(false);
+  const [input,       setInput]       = useState('');
+  const [unlocked,    setUnlocked]    = useState(false);
+  const [shake,       setShake]       = useState(false);
+  const [showCredits, setShowCredits] = useState(false);
+
+  if (showCredits) {
+    return (
+      <CreditScene
+        team={team}
+        elapsed={elapsed}
+        fragments={fragments}
+        onRestart={() => { setShowCredits(false); resetGame(); }}
+      />
+    );
+  }
 
   // The answer is either the admin-configured finalAnswer OR fallback fragments joined
   const correctAnswer = config.finalAnswer || fragments.join('-');
@@ -26,9 +39,12 @@ export default function FinalScreen({ audio }) {
       console.log('[FinalScreen] Saving elapsed:', finalElapsed, 'seconds to DB for team:', team?.id);
       stopTimer();
       setUnlocked(true);
-      showFlash('ACCESS GRANTED — MYSTIC VAULT UNLOCKED!', 'success', 6000);
+      showFlash('ACCESS GRANTED — MYSTIC VAULT UNLOCKED!', 'success', 4000);
       if (team) await markWinner(team.id, finalElapsed);
       else console.warn('[FinalScreen] team is null — markWinner not called!');
+      
+      // Auto-launch the massive 3D outro animation
+      setTimeout(() => setShowCredits(true), 2500);
     } else {
       audio.playError(); audio.playAlarm();
       setShake(true); setTimeout(()=>setShake(false),400);
@@ -108,7 +124,16 @@ export default function FinalScreen({ audio }) {
             <p style={{fontSize:'0.78rem',color:'#666',marginTop:'0.5rem'}}>
               In case of close finishes, system timestamps will determine the final ranking.
             </p>
-            <button className="btn" style={{marginTop:'1.2rem'}} onClick={resetGame}>RESET VAULT SYSTEM</button>
+            <div style={{display:'flex',gap:'1rem',justifyContent:'center',marginTop:'1.2rem',flexWrap:'wrap'}}>
+              <button
+                className="btn btn-primary"
+                onClick={() => setShowCredits(true)}
+                style={{fontFamily:"'Cinzel',serif",letterSpacing:'0.15em'}}
+              >
+                ⬡ WATCH THE ENDING
+              </button>
+              <button className="btn" onClick={resetGame}>RESET VAULT SYSTEM</button>
+            </div>
           </div>
         )}
       </div>
